@@ -24,14 +24,16 @@
 #![feature(slice_take)]
 #![feature(string_remove_matches)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::ptr::null;
 
 use anyhow::Context;
 use flate2::read::GzDecoder;
+use ijson::IValue;
 use rev_buf_reader::RevBufReader;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -58,7 +60,7 @@ enum Direction {
 // This function will process an in-network file, and submit the entries
 // to the interface implementation that handles them.
 fn process_in_network_file(url: String) -> anyhow::Result<()> {
-    let dolt_dir = "".to_string();
+    let dolt_dir = "/home/lukerhoads/Documents/dolt/quest".to_string();
 
     // Create temporary directory
     let file_uuid = Uuid::new_v4();
@@ -115,12 +117,11 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
         "insert into files values ('{}', '{}', '{}')",
         file_hash, file_name, url
     );
-    let insert_command = Command::new("dolt")
+    Command::new("dolt")
         .args(["sql", "-q", &dolt_sql_command])
         .current_dir(dolt_dir.clone())
         .status()
         .context("Failed to execute dolt insert")?;
-    assert!(insert_command.success());
 
     // Plan stuff (plan, plan file)
     // Need:
@@ -135,38 +136,51 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
 
     let keys = vec![
         "last_updated_on",
-        "plan_id",
-        "plan_id_type",
-        "plan_market_type",
-        "plan_name",
         "reporting_entity_name",
         "reporting_entity_type",
         "version",
     ];
     let blob_obj = value.as_object().unwrap();
-    let mut vals: HashMap<&str, &str> = HashMap::new();
+    let mut vals: BTreeMap<&str, String> = BTreeMap::new();
     for (_, key) in keys.iter().enumerate() {
-        vals.insert(*key, blob_obj.get(*key).unwrap().as_string().unwrap().as_str());
+        let blopaa = blob_obj.get(*key);
+        if let Some(bla) = blopaa {
+            vals.insert(*key, bla.as_string().unwrap().to_string());
+        }
     }
+
+    let opt_string_keys = vec![
+        "plan_name",
+        "plan_id_type",
+        "plan_id",
+        "plan_market_type"
+    ];
+    for (_, key) in opt_string_keys.iter().enumerate() {
+        let val = extract_string_val(&value, key);
+        if let Some(vaaa) = val {
+            vals.insert(key, vaaa);
+        }
+    }
+
+    let null_string = "NULL".to_string();
     let plan_hash = make_hash(common_json(&vals));
     let dolt_sql_command = format!(
-        "insert into plans values ('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
+        "insert into plans values ('{}', '{}', '{}', {}, {}, {}, {}, '{}', '{}')",
         plan_hash, 
-        vals.get("reporting_entity_name").unwrap(), 
-        vals.get("reporting_entity_type").unwrap(),
-        vals.get("plan_name").unwrap(),
-        vals.get("plan_id").unwrap(),
-        vals.get("plan_id_type").unwrap(),
-        vals.get("plan_market_type").unwrap(),
-        vals.get("last_updated_on").unwrap(),
-        vals.get("version").unwrap(),
+        vals.get("reporting_entity_name").unwrap_or(&null_string), 
+        vals.get("reporting_entity_type").unwrap_or(&null_string),
+        surround(vals.get("plan_name")),
+        surround(vals.get("plan_id")),
+        surround(vals.get("plan_id_type")),
+        surround(vals.get("plan_market_type")),
+        vals.get("last_updated_on").unwrap_or(&null_string),
+        vals.get("version").unwrap_or(&null_string),
     );
-    let insert_command = Command::new("dolt")
+    Command::new("dolt")
         .args(["sql", "-q", &dolt_sql_command])
         .current_dir(dolt_dir.clone())
         .status()
         .context("Failed to execute dolt insert")?;
-    assert!(insert_command.success());
 
     // plans files
     let dolt_sql_command = format!(
@@ -174,12 +188,11 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
         plan_hash,
         file_hash,
     );
-    let insert_command = Command::new("dolt")
+    Command::new("dolt")
         .args(["sql", "-q", &dolt_sql_command])
         .current_dir(dolt_dir.clone())
         .status()
         .context("Failed to execute dolt insert")?;
-    assert!(insert_command.success());
 
     // In network items
     let in_network = blob_obj.get("in_network")
@@ -190,33 +203,37 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
     // this is where heavy batch optimizations could be made, definitely have vecs that fill up with data
     // and batch insert
     // either fork this into a new thread and wait for new values with a channel
-    in_network.par_iter().for_each(|obj| {
+    in_network.par_iter().for_each(|inobj| {
         // Billing codes
         let keys = vec![
             "billing_code",
             "billing_code_type",
             "billing_code_type_version",
         ];
-        let mut vals: HashMap<&str, &str> = HashMap::new();
+        let mut vals: BTreeMap<&str, String> = BTreeMap::new();
         for (_, key) in keys.iter().enumerate() {
-            vals.insert(*key, obj.get(*key).unwrap().as_string().unwrap().as_str());
+            let val = extract_string_val(inobj, key);
+            if let None = val {
+                println!("got notin on key {}", key);
+                return
+            }
+            vals.insert(key, val.unwrap());
         }
         let code_hash = make_hash(common_json(&vals));
         let dolt_sql_command = format!(
-            "insert into codes values ({}, {}, {}, {})",
+            "insert into codes values ('{}', '{}', '{}', '{}')",
             code_hash, 
-            vals.get("billing_code_type").unwrap(), 
-            vals.get("billing_code_type_version").unwrap(),
-            vals.get("billing_code").unwrap(),
+            vals.get("billing_code_type_version").unwrap_or(&"NULL".to_string()),
+            vals.get("billing_code").unwrap_or(&"NULL".to_string()),
+            vals.get("billing_code_type").unwrap_or(&"NULL".to_string()), 
         );
-        let insert_command = Command::new("dolt")
+        Command::new("dolt")
             .args(["sql", "-q", &dolt_sql_command])
             .current_dir(dolt_dir.clone())
             .status()
             .context("Failed to execute dolt insert").expect("Unable to insert dolt codes");
-        assert!(insert_command.success());
 
-        let negotiated_rates = blob_obj.get("negotiated_rates")
+        let negotiated_rates = inobj.get("negotiated_rates")
             .unwrap()
             .as_array()
             .unwrap();
@@ -229,16 +246,39 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
             let mut price_values: Vec<(String, String, String, String, String, String, String, String)> = vec![];
             prices.into_iter().for_each(|pobj| {
                 let req_keys = vec![
-                    "additional_information",
                     "billing_class",
                     "expiration_date",
-                    "negotiated_rate",
                     "negotiated_type",
                 ];
 
-                let mut pvals: HashMap<String, String> = HashMap::new();
+                let mut pvals: BTreeMap<&str, String> = BTreeMap::new();
                 for (_, key) in req_keys.iter().enumerate() {
-                    pvals.insert(key.to_string(), pobj.get(*key).unwrap().as_string().unwrap().to_string());
+                    let val = extract_string_val(pobj, key);
+                    if let None = val {
+                        println!("got notin on key {}", key);
+                        return
+                    }
+                    pvals.insert(key, val.unwrap());
+                }
+
+                let opt_string_keys = vec![
+                    "additional_information",
+                ];
+                for (_, key) in opt_string_keys.iter().enumerate() {
+                    let val = extract_string_val(pobj, key);
+                    if let Some(vaaa) = val {
+                        pvals.insert(key, vaaa);
+                    }
+                }
+
+                let number_keys = vec![
+                    "negotiated_rate"
+                ];
+                for (_, key) in number_keys.iter().enumerate() {
+                    let val = extract_number_val(pobj, key);
+                    if let Some(vaaa) = val {
+                        pvals.insert(key, vaaa);
+                    }
                 }
 
                 // Both optional arrays, insert as serialized values
@@ -252,80 +292,86 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
                     if let Some(vjj) = kjj {
                         let arr_val = vjj.as_array().unwrap();
                         let json_val = common_json(arr_val);
-                        pvals.insert(key.to_string(), json_val);
+                        pvals.insert(key, json_val);
                     }
                 }
 
                 let price_hash = make_hash(common_json(&pvals));
                 price_values.push((
                     price_hash,
-                    pvals.get("billing_class").unwrap().to_string(),
-                    pvals.get("negotiated_type").unwrap().to_string(),
-                    pvals.get("service_code").unwrap_or(&"NULL".to_string()).to_string(),
-                    pvals.get("expiration_date").unwrap().to_string(),
-                    pvals.get("additional_information").unwrap().to_string(),
-                    pvals.get("billing_code_modifier").unwrap_or(&"NULL".to_string()).to_string(),
-                    pvals.get("negotiated_rate").unwrap().to_string(),
+                    pvals.get("billing_class").unwrap_or(&null_string).to_string(),
+                    pvals.get("negotiated_type").unwrap_or(&null_string).to_string(),
+                    surround(pvals.get("service_code")),
+                    pvals.get("expiration_date").unwrap_or(&null_string).to_string(),
+                    surround(pvals.get("additional_information")),
+                    surround(pvals.get("billing_code_modifier")),
+                    pvals.get("negotiated_rate").unwrap_or(&null_string).to_string(),
                 ));
             });
 
-            
-            let price_sql_values: Vec<String> = price_values.iter().map(|price| {
-                format!("('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')", 
-                    file_hash,
-                    code_hash,
-                    price.0,
-                    price.1,
-                    price.2,
-                    price.3,
-                    price.4,
-                    price.5,
-                    price.6,
-                    price.7,
-                )
-            }).collect();
-            let dolt_sql_command = format!("insert into prices values {}", price_sql_values.join(" "));
-            let insert_command = Command::new("dolt")
-                .args(["sql", "-q", &dolt_sql_command])
-                .current_dir(dolt_dir.clone())
-                .status()
-                .context("Failed to execute dolt insert").expect("Unable to insert dolt codes");
-            assert!(insert_command.success());
+            if price_values.len() > 0 {
+                let price_sql_values: Vec<String> = price_values.iter().map(|price| {
+                    format!("('{}', '{}', '{}', '{}', '{}', {}, '{}', {}, {}, '{}')", 
+                        file_hash,
+                        code_hash,
+                        price.0,
+                        price.1,
+                        price.2,
+                        price.3,
+                        price.4,
+                        price.5,
+                        price.6,
+                        price.7,
+                    )
+                }).collect();
+                let dolt_sql_command = format!("insert into prices values {}", price_sql_values.join(", "));
+                Command::new("dolt")
+                    .args(["sql", "-q", &dolt_sql_command])
+                    .current_dir(dolt_dir.clone())
+                    .status()
+                    .context("Failed to execute dolt insert").expect("Unable to insert dolt codes");
+            }
 
-            let provider_groups = nrobj.get("provider_groups")
-                .unwrap()
-                .as_array()
-                .unwrap();
+            // Yet another example of how we could add a util for unwrapping
+            // let provider_groups = nrobj.get("provider_groups")
+            //     .unwrap()
+            //     .as_array()
+            //     .unwrap();
 
             let mut pg_values: Vec<(String, String, String, String)> = vec![];
-            provider_groups.into_iter().for_each(|pg| {
-                let tin_obj = pg.as_object().unwrap().get("tin").unwrap();
-                let tin_type = tin_obj.get("type").unwrap().as_string().unwrap().to_string();
-                let tin_value = tin_obj.get("value").unwrap().as_string().unwrap().to_string();
-                let npi_nums = common_json(pg.get("npi").unwrap().as_array().unwrap());
-                let mut pg_map = HashMap::new();
-                pg_map.insert("npi_numbers", npi_nums.as_str()).unwrap();
-                pg_map.insert("tin_type", tin_type.as_str()).unwrap();
-                pg_map.insert("tin_value", tin_value.as_str());
-                let hash = make_hash(common_json(&pg_map));
-                pg_values.push((
-                    hash, 
-                    tin_type,
-                    tin_value,
-                    npi_nums
-                ));
-            });
-
-            let provider_groups_sql_values: Vec<String> = pg_values.iter().map(|pg| 
-                format!("('{}', '{}', '{}', '{}')", pg.0, pg.1, pg.2, pg.3)
-            ).collect();
-            let dolt_sql_command = format!("insert into provider_groups values {}", provider_groups_sql_values.join(" "));
-            let insert_command = Command::new("dolt")
-                .args(["sql", "-q", &dolt_sql_command])
-                .current_dir(dolt_dir.clone())
-                .status()
-                .expect("Unable to insert dolt provider groups");
-            assert!(insert_command.success());
+            if let Some(pgblah) = nrobj.get("provider_groups") {
+                if let Some(pgblahs) = pgblah.as_array() {
+                    if pgblahs.len() > 0 {
+                        pgblahs.into_iter().for_each(|pg| {
+                            let tin_obj = pg.as_object().unwrap().get("tin").unwrap();
+                            let tin_type = tin_obj.get("type").unwrap().as_string().unwrap().to_string();
+                            let tin_value = tin_obj.get("value").unwrap().as_string().unwrap().to_string();
+                            let npi_nums = common_json(pg.get("npi").unwrap().as_array().unwrap());
+                            let mut pg_map = BTreeMap::new();
+                            pg_map.insert("npi_numbers", npi_nums.as_str());
+                            pg_map.insert("tin_type", tin_type.as_str());
+                            pg_map.insert("tin_value", tin_value.as_str());
+                            let hash = make_hash(common_json(&pg_map));
+                            pg_values.push((
+                                hash, 
+                                tin_type,
+                                tin_value,
+                                npi_nums
+                            ));
+                        });
+            
+                        let provider_groups_sql_values: Vec<String> = pg_values.iter().map(|pg| 
+                            format!("('{}', '{}', '{}', '{}')", pg.0, pg.1, pg.2, pg.3)
+                        ).collect();
+                        let dolt_sql_command = format!("insert into provider_groups values {}", provider_groups_sql_values.join(", "));
+                        Command::new("dolt")
+                            .args(["sql", "-q", &dolt_sql_command])
+                            .current_dir(dolt_dir.clone())
+                            .status()
+                            .expect("Unable to insert dolt provider groups");
+                    }
+                }
+            }
 
             let mut price_pg_rows: Vec<(&str, &str)> = vec![];
             price_values.iter().for_each(|(pv_hash, _, _, _, _, _, _, _)| {
@@ -333,16 +379,17 @@ fn process_in_network_file(url: String) -> anyhow::Result<()> {
                     price_pg_rows.push((pg_hash.as_str(), pv_hash.as_str()))
                 });
             });
-            let price_pg_rows_values: Vec<String> = price_pg_rows.iter().map(|pg| 
-                format!("('{}', '{}')", pg.0, pg.1)
-            ).collect();
-            let dolt_sql_command = format!("insert into prices_provider_groups values {}", price_pg_rows_values.join(" "));
-            let insert_command = Command::new("dolt")
-                .args(["sql", "-q", &dolt_sql_command])
-                .current_dir(dolt_dir.clone())
-                .status()
-                .expect("Unable to insert dolt price provider groups");
-            assert!(insert_command.success());
+            if price_pg_rows.len() > 0 {
+                let price_pg_rows_values: Vec<String> = price_pg_rows.iter().map(|pg| 
+                    format!("('{}', '{}')", pg.0, pg.1)
+                ).collect();
+                let dolt_sql_command = format!("insert ignore into prices_provider_groups values {}", price_pg_rows_values.join(", "));
+                Command::new("dolt")
+                    .args(["sql", "-q", &dolt_sql_command])
+                    .current_dir(dolt_dir.clone())
+                    .status()
+                    .expect("Unable to insert dolt price provider groups");
+            }
         });
     });
 
@@ -366,6 +413,42 @@ fn common_json<T: Serialize>(obj: &T) -> String {
     let ser_string = serde_json::to_string(&obj).unwrap();
     let split: Vec<_> = ser_string.split(":").collect();
     split.join(": ")
+}
+
+// Extracts value from obj and returns one option
+// TODO: look into libraries to fix these nesting ifs
+fn extract_string_val(obj: &IValue, key: &str) -> Option<String> {
+    if let Some(pkg) = obj.get(key) {
+        if let Some(pkga) = pkg.as_string() {
+            Some(pkga.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+fn extract_number_val(obj: &IValue, key: &str) -> Option<String> {
+    if let Some(pkg) = obj.get(key) {
+        if let Some(pkga) = pkg.as_number() {
+            Some(pkga.to_f64().unwrap().to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+// Only adds extra quotes around a value if it is not None
+fn surround(opt: Option<&String>) -> String {
+    match opt {
+        Some(st) => {
+            format!("'{}'", st)
+        },
+        None => "NULL".to_string()
+    }
 }
 
 fn compute_offset(input_file: &str, position: Position) -> usize {
@@ -399,6 +482,7 @@ fn compute_offset(input_file: &str, position: Position) -> usize {
 }
 
 fn main() -> anyhow::Result<()> {
+    // TODO: filtering files (codes.csv and the other one)
     let offset_file_location = "./buf-offset";
     let input_file_location = "./example-input.txt";
     let line_pos = Some(Position::Middle(2)).unwrap_or(Position::Start);
@@ -536,7 +620,7 @@ mod tests {
             make_hash(format!("{{\"filename\": \"hello\"}}"))
         );
 
-        let mut testmap = HashMap::new();
+        let mut testmap = BTreeMap::new();
         testmap.insert("filename", "hello");
         assert_eq!(
             "538167972721089466",
