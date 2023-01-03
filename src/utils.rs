@@ -57,6 +57,7 @@ pub fn surround(opt: Option<&String>) -> String {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct CommandExecutor {
     dolt_dir: String,
     mock: bool,

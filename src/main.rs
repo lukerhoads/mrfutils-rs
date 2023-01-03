@@ -24,7 +24,10 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, Duration};
+use std::sync::mpsc::channel;
+use std::thread;
 
 use anyhow::Context;
 use clap::Parser;
@@ -36,9 +39,11 @@ use rev_buf_reader::RevBufReader;
 use tempfile::{Builder, TempDir};
 use urlparse::urlparse;
 use uuid::Uuid;
+use threadpool::ThreadPool;
 
 use utils::*;
 
+#[derive(Clone, Debug)]
 struct FileProcessor {
     executor: CommandExecutor,
     code_whitelist: Option<Vec<String>>,
@@ -656,6 +661,9 @@ struct Args {
     #[clap(long, default_value = "./npis.csv")]
     npi_file: String,
 
+    #[clap(long, default_value_t = 4)]
+    n_workers: usize,
+
     #[clap(long)]
     offset_file: Option<String>,
 
@@ -769,7 +777,7 @@ fn main() -> anyhow::Result<()> {
             Position::End => SeekFrom::End(0),
         })
         .expect("Unable to seek position in buffer.");
-    let mut offset_buf: Box<dyn BufRead> = match direction {
+    let mut offset_buf: Box<dyn BufRead + Send> = match direction {
         Direction::Forward => Box::new(BufReader::new(input)),
         Direction::Backward => Box::new(RevBufReader::new(input)),
     };
@@ -780,37 +788,55 @@ fn main() -> anyhow::Result<()> {
         Position::End => total_lines,
     };
 
-    let processor = FileProcessor::new(args.dolt_dir, args.mock, &codes_file, &npi_file);
-    loop {
-        if curr_line == 0 || (max_line_pos.is_some() && max_line_pos.unwrap() == curr_line) {
-            break;
-        }
-        let url = {
-            let mut line = String::new();
-            offset_buf
-                .as_mut()
-                .read_line(&mut line)
-                .context("Unable to read until next newline")?;
-            line
+    let pool = ThreadPool::new(args.n_workers);
+    let (tx, rx) = channel();
+    
+    thread::spawn(move || {
+        loop {
+            if curr_line == 0 || curr_line > total_lines || (max_line_pos.is_some() && max_line_pos.unwrap() == curr_line) {
+                tx.send("end".to_string()).unwrap();
+                break;
+            } 
+           
+            tx.send({
+                let mut line = String::new();
+                offset_buf
+                    .as_mut()
+                    .read_line(&mut line)
+                    .unwrap();
+                line
+            }).unwrap();
+            if curr_line <= total_lines && matches!(direction, Direction::Forward) {
+                curr_line += 1;
+            } else if curr_line > 0 && matches!(direction, Direction::Backward) {
+                curr_line -= 1;
+            } else {
+                continue;
+            }
         };
-
-        let start = Instant::now();
-        if let Err(e) = processor.process_in_network_file(url.clone()) {
-            info!("{}", e.to_string());
-            continue;
-        };
-        let duration = start.elapsed();
-        info!("Processed {} in {:?}s", url, duration);
-
-        if curr_line < total_lines && matches!(direction, Direction::Forward) {
-            curr_line += 1;
-        } else if curr_line > 0 && matches!(direction, Direction::Backward) {
-            curr_line -= 1;
-        } else {
+    });
+    
+    while let Ok(val) = rx.recv() {
+        if val != "" {
+            let processor = Arc::new(Mutex::new(FileProcessor::new(args.dolt_dir.clone(), args.mock, &codes_file, &npi_file)));
+            pool.execute(move || {
+                let processor = processor.lock().unwrap();
+                let start = Instant::now();
+                if let Err(e) = processor.process_in_network_file(val.clone()) {
+                    info!("{}", e.to_string());
+                    return;
+                };
+                let duration = start.elapsed();
+                info!("Processed {} in {:?}s", val, duration);
+            })
+        } else if val == "end" {
+            info!("End of lines, exiting...");
             break;
         }
     }
 
+    while pool.active_count() > 0 {}
+    info!("Finished.");
     Ok(())
 }
 
