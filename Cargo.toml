@@ -5,6 +5,10 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "mrfutils"
+path = "src/main.rs"
+
 [dependencies]
 rev_buf_reader = "0.3.0"
 tempfile = "3.3.0"
