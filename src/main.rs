@@ -21,31 +21,31 @@ mod utils;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, Duration};
-use std::sync::mpsc::channel;
+use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
 use anyhow::Context;
 use clap::Parser;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use ijson::{IArray, IObject, IValue};
-use log::info;
+use log::{info, warn};
 use rayon::prelude::*;
 use rev_buf_reader::RevBufReader;
 use tempfile::{Builder, TempDir};
 use urlparse::urlparse;
 use uuid::Uuid;
 use threadpool::ThreadPool;
+use url::Url;
 
 use utils::*;
 
 #[derive(Clone, Debug)]
 struct FileProcessor {
-    executor: CommandExecutor,
     code_whitelist: Option<Vec<String>>,
     npi_whitelist: Option<Vec<String>>,
 }
@@ -82,13 +82,14 @@ impl FileProcessor {
         };
 
         FileProcessor {
-            executor: CommandExecutor::new(dolt_dir, mock),
             code_whitelist: codes,
             npi_whitelist: npis,
         }
     }
 
     fn download(&self, url: &str) -> anyhow::Result<(TempDir, String)> {
+        Url::parse(url)?;
+
         // Create temporary directory
         let file_uuid = Uuid::new_v4();
         let tmp_dir = Builder::new()
@@ -101,7 +102,7 @@ impl FileProcessor {
         let path = Path::new(&url_parsed.path);
         let extension = path
             .extension()
-            .context("Unable to get file extension")?
+            .context(format!("Unable to get file extension of path {}", path.to_str().unwrap()))?
             .to_str()
             .unwrap_or("");
         let file_name = path
@@ -120,10 +121,9 @@ impl FileProcessor {
         if !response.status().is_success() {
             return Err(anyhow::Error::msg("Bad response from server."));
         }
-        if extension.contains("json.gz") {
-            let gz = GzDecoder::new(response);
-            let mut reader = BufReader::new(gz);
-            io::copy(&mut reader, &mut file).context("Unable to copy decompressed target file")?;
+        if extension.contains("gz") {
+            let mut gz = MultiGzDecoder::new(response);
+            io::copy(&mut gz, &mut file).context("Unable to copy decompressed target file")?;
         } else if extension.contains("json") {
             response
                 .copy_to(&mut file)
@@ -136,7 +136,7 @@ impl FileProcessor {
     }
 
     // This function will process an in-network file, and submit the entries
-    pub fn process_in_network_file(&self, url: String) -> anyhow::Result<()> {
+    pub fn process_in_network_file(&self, url: String, tx: Sender<String>) -> anyhow::Result<()> {
         let (tmp_dir, file_name) = self.download(url.as_str())?;
 
         let file_name_path = tmp_dir.path().join(file_name.as_str());
@@ -152,7 +152,7 @@ impl FileProcessor {
             file_name,
             url.as_str()
         );
-        self.executor.execute_command(&dolt_sql_command)?;
+        tx.send(dolt_sql_command)?;
 
         // Plans
         let keys = vec![
@@ -192,7 +192,7 @@ impl FileProcessor {
             vals.get("last_updated_on").unwrap_or(&null_string),
             vals.get("version").unwrap_or(&null_string),
         );
-        self.executor.execute_command(&dolt_sql_command)?;
+        tx.send(dolt_sql_command)?;
 
         // Provider references
         let provider_references = blob_obj.get("provider_references");
@@ -213,7 +213,7 @@ impl FileProcessor {
             "insert into plans_files values ({}, {})",
             plan_hash, file_hash,
         );
-        self.executor.execute_command(&dolt_sql_command)?;
+        tx.send(dolt_sql_command)?;
 
         // In network
         let in_network = blob_obj.get("in_network").unwrap().as_array().unwrap();
@@ -222,7 +222,7 @@ impl FileProcessor {
         // and batch insert
         // either fork this into a new thread and wait for new values with a channel
         in_network
-            .par_iter()
+            .iter()
             .map(|inobj| -> anyhow::Result<()> {
                 // Billing codes
                 let keys = vec![
@@ -261,7 +261,7 @@ impl FileProcessor {
                     vals.get("billing_code").unwrap_or(&"NULL".to_string()),
                     vals.get("billing_code_type").unwrap_or(&"NULL".to_string()),
                 );
-                self.executor.execute_command(&dolt_sql_command)?;
+                tx.send(dolt_sql_command)?;
 
                 let negotiated_rates = inobj.get("negotiated_rates").unwrap().as_array().unwrap();
                 negotiated_rates
@@ -355,7 +355,7 @@ impl FileProcessor {
                                 "insert into provider_groups values {}",
                                 provider_groups_sql_values.join(", ")
                             );
-                            self.executor.execute_command(&dolt_sql_command)?;
+                            tx.send(dolt_sql_command)?;
                         } else {
                             return Ok(())
                         }
@@ -466,7 +466,7 @@ impl FileProcessor {
                                 "insert into prices values {}",
                                 price_sql_values.join(", ")
                             );
-                            self.executor.execute_command(&dolt_sql_command)?;
+                            tx.send(dolt_sql_command)?;
                         }
 
                         let mut price_pg_rows: Vec<(&str, &str)> = vec![];
@@ -486,7 +486,7 @@ impl FileProcessor {
                                 "insert ignore into prices_provider_groups values {}",
                                 price_pg_rows_values.join(", ")
                             );
-                            self.executor.execute_command(&dolt_sql_command)?;
+                            tx.send(dolt_sql_command)?;
                         }
 
                         Ok(())
@@ -699,6 +699,10 @@ fn main() -> anyhow::Result<()> {
     let input = File::open(input_file_location)?;
     let buf = BufReader::new(input);
 
+    if args.dolt_dir == "" {
+        panic!("Dolt dir empty");
+    }
+
     let total_lines = buf.lines().count();
     let line_pos_number = match line_pos {
         Position::Start => 0,
@@ -790,7 +794,8 @@ fn main() -> anyhow::Result<()> {
 
     let pool = ThreadPool::new(args.n_workers);
     let (tx, rx) = channel();
-    
+    let (commandtx, commandrx) = channel::<String>();
+
     thread::spawn(move || {
         loop {
             if curr_line == 0 || curr_line > total_lines || (max_line_pos.is_some() && max_line_pos.unwrap() == curr_line) {
@@ -815,14 +820,29 @@ fn main() -> anyhow::Result<()> {
             }
         };
     });
+
+    let command_executor = CommandExecutor::new(args.dolt_dir.clone(), args.mock);
+    thread::spawn(move || {
+        loop {
+            if let Ok(val) = commandrx.recv() {
+                if val != "" {
+                    if let Err(e) = command_executor.execute_command(val.as_str()) {
+                        warn!("Error encountered in command thread: {}", e);
+                        continue;
+                    }
+                }
+            }
+        }
+    });
     
     while let Ok(val) = rx.recv() {
         if val != "" {
             let processor = Arc::new(Mutex::new(FileProcessor::new(args.dolt_dir.clone(), args.mock, &codes_file, &npi_file)));
+            let commandtx = commandtx.clone();
             pool.execute(move || {
                 let processor = processor.lock().unwrap();
                 let start = Instant::now();
-                if let Err(e) = processor.process_in_network_file(val.clone()) {
+                if let Err(e) = processor.process_in_network_file(val.clone(), commandtx) {
                     info!("{}", e.to_string());
                     return;
                 };
@@ -838,6 +858,40 @@ fn main() -> anyhow::Result<()> {
     while pool.active_count() > 0 {}
     info!("Finished.");
     Ok(())
+}
+
+
+#[derive(Clone, Debug)]
+pub struct CommandExecutor {
+    dolt_dir: String,
+    mock: bool,
+}
+
+impl CommandExecutor {
+    pub fn new(dolt_dir: String, mock: bool) -> Self {
+        CommandExecutor { dolt_dir, mock }
+    }
+    // TODO - remove warning from this function
+    // Executes the Dolt sql command. Will mock it if the MOCK env variable is set.
+    pub fn execute_command(&self, dolt_command: &str) -> anyhow::Result<()> {
+        if !self.mock {
+            // let (cpref, _) = dolt_command.split_at(50);
+            // println!("{dolt_command}");
+            let mut command = Command::new("dolt");
+            command.current_dir(&self.dolt_dir);
+            command.args(["sql", "-q", dolt_command]);
+            // println!("{:?}", &command);
+            let output = command
+                .output()
+                .unwrap();
+                // .context(format!("Failed to execute dolt insert on command {dolt_command}"))?;
+            if let Err(e) = output.status.exit_ok() {
+                io::stdout().write_all(&output.stderr).unwrap();
+                panic!("Database rejection due to error {}", e);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

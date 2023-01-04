@@ -1,9 +1,6 @@
-use anyhow::Context;
 use ijson::IValue;
-use log::warn;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::process::Command;
 
 // Makes a hash for the given serde value
 // Note - insert values with their keys sorted alphabetically
@@ -54,33 +51,5 @@ pub fn surround(opt: Option<&String>) -> String {
             format!("'{}'", st)
         }
         None => "NULL".to_string(),
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct CommandExecutor {
-    dolt_dir: String,
-    mock: bool,
-}
-
-impl CommandExecutor {
-    pub fn new(dolt_dir: String, mock: bool) -> Self {
-        CommandExecutor { dolt_dir, mock }
-    }
-
-    // TODO - remove warning from this function
-    // Executes the Dolt sql command. Will mock it if the MOCK env variable is set.
-    pub fn execute_command(&self, dolt_command: &str) -> anyhow::Result<()> {
-        if !self.mock {
-            let output = Command::new("dolt")
-                .args(["sql", "-q", dolt_command])
-                .current_dir(&self.dolt_dir)
-                .output()
-                .context("Failed to execute dolt insert")?;
-            if let Err(e) = output.status.exit_ok() {
-                warn!("Database rejection due to error {}", e);
-            }
-        }
-        Ok(())
     }
 }

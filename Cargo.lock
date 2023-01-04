@@ -715,6 +715,7 @@ dependencies = [
  "tempfile",
  "threadpool",
  "tracing",
+ "url",
  "urlparse",
  "uuid",
 ]
