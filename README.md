@@ -2,6 +2,14 @@
 
 Rust port of `mrfutils`, a Python script for processing files for the [quest](https://www.dolthub.com/repositories/dolthub/quest) data bounty.
 
+## Prerequisites
+To run this, you must first install [Rust](https://www.rust-lang.org/tools/install). 
+This runs on nightly, so then you must run 
+```shell
+rustup default nightly
+```
+to set the toolchain to nightly.
+
 ## Configuration
 
 To configure `mrfutils-rs`, you must configure the filter codes and NPIs.
