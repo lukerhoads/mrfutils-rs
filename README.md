@@ -12,6 +12,23 @@ to set the toolchain to nightly.
 
 ## Configuration
 
+```
+Usage: mrfutils [OPTIONS] --dolt-dir <DOLT_DIR>
+
+Options:
+      --input-file <INPUT_FILE>    [default: ./input.txt]
+      --codes-file <CODES_FILE>    [default: ./codes.csv]
+      --npi-file <NPI_FILE>        [default: ./npis.csv]
+      --n-workers <N_WORKERS>      [default: 4]
+      --offset-file <OFFSET_FILE>
+      --line-pos <LINE_POS>
+      --direction <DIRECTION>
+      --dolt-dir <DOLT_DIR>
+      --mock
+  -p, --performance-graph
+  -h, --help                       Print help information
+```
+
 To configure `mrfutils-rs`, you must configure the filter codes and NPIs.
 
 Then, you need to set the `DOLT_DIR` environment variable or pass it directly. This represents the directory where your dolt repository is.
