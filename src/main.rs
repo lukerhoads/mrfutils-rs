@@ -2,7 +2,7 @@
 // Another sub module binary that prepares the input file
 // Preferably have a status bar
 
-// Show file processing times, graph them based on logs
+// Show file Processing times, graph them based on logs
 // Performance tracking - RAM, CPU, graphs - through logs? - thorugh --perf flag
 // Structured logging - check out https://github.com/tokio-rs/tracing
 // Takes NPI and code filters
@@ -142,6 +142,7 @@ impl FileProcessor {
         let value: ijson::IValue =
             serde_json::de::from_reader(newfile).expect("Unable to deserialize target file.");
 
+        info!("Processing file details for {}", &file_name);
         // Filename hash, filename, and url extraction
         let file_hash = make_hash(format!("{{\"filename\": \"{}\"}}", file_name.as_str()));
         let dolt_sql_command = format!(
@@ -176,6 +177,7 @@ impl FileProcessor {
             }
         }
 
+        info!("Processing plan data for {}", &file_name);
         let null_string = "NULL".to_string();
         let plan_hash = make_hash(common_json(&vals));
         let dolt_sql_command = format!(
@@ -216,6 +218,7 @@ impl FileProcessor {
         // In network
         let in_network = blob_obj.get("in_network").unwrap().as_array().unwrap();
 
+        info!("Processing in network for {}", &file_name);
         // this is where heavy batch optimizations could be made, definitely have vecs that fill up with data
         // and batch insert
         // either fork this into a new thread and wait for new values with a channel
@@ -261,6 +264,7 @@ impl FileProcessor {
                 );
                 tx.send(dolt_sql_command)?;
 
+                info!("Processing negotiated rate data for {}", &file_name);
                 let negotiated_rates = inobj.get("negotiated_rates").unwrap().as_array().unwrap();
                 negotiated_rates
                     .into_iter()
@@ -467,6 +471,7 @@ impl FileProcessor {
                             tx.send(dolt_sql_command)?;
                         }
 
+                        info!("Processing price/pg data for {}", &file_name);
                         let mut price_pg_rows: Vec<(&str, &str)> = vec![];
                         price_values
                             .iter()
@@ -840,10 +845,12 @@ fn main() -> anyhow::Result<()> {
             pool.execute(move || {
                 let processor = processor.lock().unwrap();
                 let start = Instant::now();
-                if let Err(e) = processor.process_in_network_file(val.clone(), commandtx) {
-                    info!("{}", e.to_string());
-                    return;
-                };
+                if val != "end" {
+                    if let Err(e) = processor.process_in_network_file(val.clone(), commandtx) {
+                        info!("{}", e.to_string());
+                        return;
+                    };
+                }
                 let duration = start.elapsed();
                 info!("Processed {} in {:?}s", val, duration);
             })
