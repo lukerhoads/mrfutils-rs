@@ -42,3 +42,8 @@ Finally, you can run the program using the run script.
 ```shell
 sh ./scripts/run.sh $DOLT_DIR
 ```
+
+If you want to supply extra arguments, either build and run the binary or directly run it by doing
+```shell
+RUST_LOG=info cargo run -- {OPTIONS_HERE}
+```

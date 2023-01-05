@@ -52,8 +52,6 @@ struct FileProcessor {
 
 impl FileProcessor {
     pub fn new(
-        dolt_dir: String,
-        mock: bool,
         code_loc: &str,
         npi_loc: &str,
     ) -> Self {
@@ -837,7 +835,7 @@ fn main() -> anyhow::Result<()> {
     
     while let Ok(val) = rx.recv() {
         if val != "" {
-            let processor = Arc::new(Mutex::new(FileProcessor::new(args.dolt_dir.clone(), args.mock, &codes_file, &npi_file)));
+            let processor = Arc::new(Mutex::new(FileProcessor::new(&codes_file, &npi_file)));
             let commandtx = commandtx.clone();
             pool.execute(move || {
                 let processor = processor.lock().unwrap();
